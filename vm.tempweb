@@ -1,0 +1,28 @@
+const express = require('express');
+const app = express();
+const port = 8080;
+
+let temperature = "Ei toimi";
+
+const mqtt = require('mqtt');
+
+// IMPORTANT: Use WebSocket port 9001!
+const client = mqtt.connect('ws://172.20.49.76:9001');
+
+client.on('connect', function () {
+    console.log("MQTT connected (Node)");
+    client.subscribe('ryhmä4/temperature');
+});
+
+client.on('message', function (topic, message) {
+    temperature = message.toString();
+    console.log("MQTT received:", temperature);
+});
+
+app.get('/', (req, res) => {
+    res.send("Current temperature: " + temperature);
+});
+
+app.listen(port, () => {
+    console.log(`Server listening on port ${port}`);
+});

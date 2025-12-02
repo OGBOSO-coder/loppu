@@ -1,0 +1,214 @@
+#define TEMPERATURE // Comment out to compile light level board code
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+
+#ifdef TEMPERATURE
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#endif
+
+// Wifi settings
+const char* ssid = "WIFI_ID";
+const char* password = "WIFI_PASSWORD";
+
+// MQTT Server IP address
+const char* mqtt_server = "172.20.49.76";  // broker (VM) IP ("ip a"): .76 (Boso) / .57 (SB)
+
+#ifdef TEMPERATURE
+const char* mqtt_channel = "ryhmä4/temperature";
+#else  // LIGHT LEVEL
+const char* mqtt_channel = "ryhmä4/light";
+#endif
+
+
+// WiFi client
+WiFiClient espClient;
+// MQTT client
+PubSubClient mqttClient(espClient);
+
+#ifdef TEMPERATURE
+// DHT sensor settings
+#define DHTPIN 27
+#define DHTTYPE DHT11  // or DHT22?
+DHT dht(DHTPIN, DHTTYPE);
+#else  // LIGHT LEVEL
+const int PHOTOCELL_INPUT_PIN = 32;
+#endif
+
+/* Variables for tracking the measurements for average calculation */
+int amountOfMeasurements = 5;
+int measurementCounter = 0;
+
+/* Measurements array */
+#ifdef TEMPERATURE
+float measurements[] = { 0.0, 0.0, 0.0, 0.0, 0.0 };  // Temperatures
+#else // LIGHT LEVEL
+int measurements[] = { 0, 0, 0, 0, 0 };  // Light levels
+#endif
+
+#ifdef TEMPERATURE
+// sCREEN
+Adafruit_SSD1306 display(128, 64, &Wire, -1);  // last one = Reset pin # (or -1 if sharing Arduino reset pin)
+#endif
+
+
+// Application setup
+void setup() {
+  // Serial
+  Serial.begin(115200);
+
+  while (!Serial) {}
+
+#ifdef TEMPERATURE
+  // DHT temperature sensor
+  dht.begin();
+
+  // sCREEN
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;)
+      ;  // Don't proceed, loop forever
+  }
+
+  display.clearDisplay();
+#else  // LIGHT LEVEL
+  pinMode(PHOTOCELL_INPUT_PIN, INPUT);
+#endif
+
+  // WiFi connection
+  setup_wifi();
+
+  // MQTT
+  mqttClient.setServer(mqtt_server, 1883);
+
+  Serial.println("Using array for calculating the sliding average.");
+}
+
+// WiFi connection
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to WiFi SSID: ");
+  Serial.println(ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    // Serial.println(WiFi.status()); // DEBUG
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// MQTT connection
+void reconnect() {
+  // Loop until we're reconnected
+  while (!mqttClient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (mqttClient.connect("ESP32_Client")) {
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" - Retrying in 3 seconds");
+      // Wait 3 seconds before retrying
+      delay(3000);
+    }
+  }
+}
+
+/* Function that is used to add or update new measurement in the list */
+#ifdef TEMPERATURE
+void addMeasurement(float temperature) {
+#else
+void addMeasurement(int temperature) {
+#endif
+  measurements[measurementCounter] = temperature;
+  /* Update position */
+  measurementCounter = ++measurementCounter % amountOfMeasurements;
+}
+
+/* Function to calculate the average of measured temperatures */
+float calculateAverage() {
+  float avg = 0.0;
+  for (int counter = 0; counter < amountOfMeasurements; counter++) {
+    avg += measurements[counter];
+  }
+  /* Calculate the average temp */
+  avg = avg / amountOfMeasurements;
+  return (avg);
+}
+
+// Application main loop
+void loop() {
+  // Reconnect mqtt if connection has been lost
+  if (!mqttClient.connected()) {
+    reconnect();
+  }
+
+#ifdef TEMPERATURE  // Display is only used for temperature
+  // Variable for measured temperature
+  float measure = dht.readTemperature();
+
+  // Screen
+  display.clearDisplay();
+  display.setTextSize(3);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 10);
+  // Display static text
+  display.println("Temp:");
+  if (measure == measure) { // Cannot use ternary operator because return float type mismatches with string "-"
+    display.println(measure);
+  } else  // isNaN
+  {
+    display.println("-");
+  }
+  
+  display.display();
+#else
+  int measure = analogRead(PHOTOCELL_INPUT_PIN);
+#endif
+
+// Print measurement to serial console
+#ifdef TEMPERATURE
+  Serial.print("Temperature measured: ");
+  Serial.print(measure);
+  Serial.print(" °C");
+#else
+  Serial.printf("Light level measured: %d", measure);
+#endif
+
+  if (measure == measure)  // !isNaN
+  {
+    // Variable for average temperature
+    float average = 0.0;
+    // Add measurement to list, calculate average temp and send it to mqtt
+    addMeasurement(measure);
+    average = calculateAverage();
+
+    // Print measured temperature to serial console
+    Serial.print(" / Average from array (published): ");
+    Serial.println(average);
+
+    // Convert the average temperature value to a char array and publish it to MQTT
+    char tempString[8];
+    dtostrf(average, 1, 2, tempString);
+    mqttClient.publish(mqtt_channel, tempString);
+  } else {
+    Serial.print(" (NaN value ignored for publish)\n");
+  }
+
+  // Sleep X seconds before next measurement
+  sleep(2);
+}
